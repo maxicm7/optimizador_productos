@@ -150,35 +150,38 @@ def optimizar_produccion(productos, insumos, equipos, personal, recetas, params)
     if resultado.success: return resultado, None, A_ub, b_ub, costos_variables
     else: return None, resultado.message, None, None, None
 
-def call_llama_api(api_key, context, question):
-    if not api_key or api_key == "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxx": # Asumiendo un valor placeholder
-        return "Por favor, introduce tu API Key de Hugging Face en la barra lateral para usar el análisis con IA."
+def extract_text_from_pdf(uploaded_file):
+    """Extrae texto de un archivo PDF subido."""
+    text = ""
+    try:
+        pdf_reader = PdfReader(io.BytesIO(uploaded_file.getvalue()))
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+    except Exception as e:
+        st.error(f"Error al leer el PDF '{uploaded_file.name}': {e}")
+    return text
+
+def get_hf_response(api_key, model_name, full_prompt, temperature=0.7, top_p=0.9, max_new_tokens=1024):
+    """
+    Llama a la API de Hugging Face con un prompt completo.
+    Adaptada para ser la función 'call_llama_api' que usabas, pero con el nombre 'get_hf_response'.
+    """
+    if not api_key:
+        return "Por favor, introduce tu API Key de Hugging Face en la barra lateral."
+    
     try:
         client = InferenceClient(token=api_key)
         
-        prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-
-Eres un consultor de negocios experto. Analiza el contexto proporcionado que incluye datos de optimización y un análisis de mercado. Responde la pregunta del usuario de forma clara, concisa y ofreciendo recomendaciones accionables.<|eot_id|><|start_header_id|>user<|end_header_id|>
-
-**Contexto:**
-{context}
-
-**Pregunta:**
-{question}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-"""
-        
         response = client.text_generation(
-            model="meta-llama/Meta-Llama-3.1-8B-Instruct",
-            prompt=prompt,
-            max_new_tokens=1024,
-            temperature=0.7,
-            top_p=0.9,
-            # Asegurarse de que el modelo Llama 3.1 no se cargue en modo chat si no es necesario,
-            # aunque InferenceClient maneja esto bien con text_generation.
+            model=model_name,
+            prompt=full_prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
         )
         return response
     except Exception as e:
-        return f"Error al contactar la API de Hugging Face: {e}. Asegúrate de que tu API Key sea válida y que el modelo 'meta-llama/Meta-Llama-3.1-8B-Instruct' esté disponible para tu cuenta."
+        return f"Error al contactar la API de Hugging Face: {e}. Asegúrate de que tu API Key sea válida y que el modelo '{model_name}' esté disponible para tu cuenta."
 
 # --- Interfaz de la App ---
 st.title("💰 Optimizador de Rentabilidad Empresarial")
@@ -189,13 +192,22 @@ for key, df in initial_data.items():
     if key not in st.session_state:
         st.session_state[key] = df
 
+# --- Inicialización específica para la página de chat ---
+if "insights_messages" not in st.session_state:
+    st.session_state.insights_messages = []
+if "hf_model" not in st.session_state:
+    st.session_state.hf_model = "meta-llama/Meta-Llama-3.1-8B-Instruct" # Modelo por defecto
+if "hf_temp" not in st.session_state:
+    st.session_state.hf_temp = 0.7 # Temperatura por defecto
+
+
 # --- Limpieza de Datos en cada Rerun ---
 # Se mantiene para limpiar recetas huérfanas si el usuario borra productos o recursos
 clean_up_data()
 
 # --- Barra Lateral y Navegación ---
 st.sidebar.header("Navegación")
-page = st.sidebar.radio("Ir a:", ["⚙️ 1. Configuración de Recursos", "📝 2. Definición de Procesos", "📈 3. Parámetros Financieros", "🚀 4. Optimización y Resultados", "🧠 5. Análisis con IA"])
+page = st.sidebar.radio("Ir a:", ["⚙️ 1. Configuración de Recursos", "📝 2. Definición de Procesos", "📈 3. Parámetros Financieros", "🚀 4. Optimización y Resultados", "🧠 5. Análisis con IA (Chat)"])
 st.sidebar.header("🔑 Configuración API")
 hf_api_key = None
 try:
@@ -206,6 +218,9 @@ except:
     hf_api_key = st.sidebar.text_input("Ingresa tu Hugging Face API Key", type="password", help="Necesaria para el análisis con IA. Puedes obtenerla en huggingface.co/settings/tokens")
     if not hf_api_key:
         st.sidebar.info("Por favor, introduce tu API Key para usar la función de IA.")
+
+# Guardar API Key en session_state para que esté disponible en la función de chat
+st.session_state.hf_api_key = hf_api_key 
 
 
 # --- Contenido de las Páginas ---
@@ -242,10 +257,9 @@ elif page == "📝 2. Definición de Procesos":
         with st.form("add_recipe_form"):
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                # Si no hay productos, la opción por defecto es "---" y el selector está deshabilitado
                 selected_producto = st.selectbox("Producto", 
                                                 options=['---'] + productos_validos, 
-                                                index=0, # Por defecto seleccionado "---"
+                                                index=0, 
                                                 key="new_recipe_producto")
             with col2:
                 selected_tipo = st.selectbox("Tipo de Recurso", options=tipos_recurso_validos, key="new_recipe_tipo")
@@ -259,11 +273,11 @@ elif page == "📝 2. Definición de Procesos":
                 recursos_disponibles = list(st.session_state.personal['Rol'].unique())
 
             with col3:
-                # Si no hay recursos disponibles para el tipo seleccionado, la opción por defecto es "---"
                 selected_recurso = st.selectbox("Recurso Específico", 
                                                 options=['---'] + recursos_disponibles, 
-                                                index=0, # Por defecto seleccionado "---"
-                                                key="new_recipe_recurso")
+                                                index=0, 
+                                                key="new_recipe_recurso",
+                                                disabled=not bool(recursos_disponibles)) 
             with col4:
                 new_cantidad = st.number_input("Cantidad", min_value=0.01, value=1.0, step=0.1, key="new_recipe_cantidad")
             
@@ -275,7 +289,6 @@ elif page == "📝 2. Definición de Procesos":
                 elif new_cantidad <= 0:
                     st.error("La cantidad debe ser mayor que 0.")
                 else:
-                    # Comprobar si ya existe una receta idéntica
                     if not st.session_state.recetas[(st.session_state.recetas['Producto'] == selected_producto) &
                                                     (st.session_state.recetas['Tipo'] == selected_tipo) &
                                                     (st.session_state.recetas['Recurso'] == selected_recurso)].empty:
@@ -288,7 +301,7 @@ elif page == "📝 2. Definición de Procesos":
     st.divider()
 
     st.subheader("Editar o Eliminar Recetas Existentes")
-    st.info("Puedes editar directamente las cantidades o eliminar filas. Asegúrate de que los nombres de Producto, Tipo y Recurso sean exactos a los que definiste.")
+    st.info("Puedes editar directamente las cantidades o eliminar filas. Asegúrate de que los nombres de Producto, Tipo y Recurso sean exactos a los que definiste en la sección 'Configuración de Recursos'. Cualquier receta con un producto o recurso inválido será limpiada automáticamente.")
     
     st.session_state.recetas = st.data_editor(
         st.session_state.recetas,
@@ -327,7 +340,6 @@ elif page == "🚀 4. Optimización y Resultados":
                 )
             if msg: 
                 st.error(f"Error en la optimización: {msg}")
-                # Limpiar resultados anteriores si la optimización falla
                 if 'resultados_optimizacion' in st.session_state:
                     del st.session_state.resultados_optimizacion
                 if 'produccion_optima' in st.session_state:
@@ -335,11 +347,11 @@ elif page == "🚀 4. Optimización y Resultados":
             else:
                 st.success("¡Optimización completada!")
                 st.session_state.resultados_optimizacion, st.session_state.A_ub, st.session_state.b_ub, st.session_state.costos_variables = res, A, b, costs
-                # Asegurarse de que el DataFrame de producción óptima se construye correctamente
+                
                 if res and res.x is not None and len(res.x) == len(st.session_state.productos):
                     st.session_state.produccion_optima = pd.DataFrame({'Producto': st.session_state.productos['Nombre'], 'Cantidad a Producir': res.x})
                 else:
-                    st.error("Error al generar el plan de producción. Los resultados de la optimización pueden ser inválidos.")
+                    st.error("Error al generar el plan de producción. Los resultados de la optimización pueden ser inválidos o los datos inconsistentes.")
                     if 'produccion_optima' in st.session_state: del st.session_state.produccion_optima
 
     if 'resultados_optimizacion' in st.session_state and st.session_state.resultados_optimizacion: # Verificar que haya resultados válidos
@@ -347,10 +359,9 @@ elif page == "🚀 4. Optimización y Resultados":
         
         beneficio_bruto = -res.fun
         
-        # Validar la longitud de los arrays de costos antes de la multiplicación de matrices
         if res.x is None or len(res.x) != len(costs['insumos']) or len(res.x) != len(costs['personal']):
             st.error("Error: La longitud de los resultados de producción no coincide con los costos unitarios. Por favor, revisa tus recetas y la configuración de recursos.")
-            beneficio_neto = 0 # Establecer a 0 para evitar más errores
+            beneficio_neto = 0 
             costo_financiero = 0
         else:
             costo_total_variable = np.dot(res.x, costs['insumos']) + np.dot(res.x, costs['personal'])
@@ -374,7 +385,6 @@ elif page == "🚀 4. Optimización y Resultados":
                 st.info("No hay un plan de producción óptimo para mostrar.")
         with c2:
             st.subheader("Uso de Recursos")
-            # Construir las etiquetas de las restricciones dinámicamente
             labels = []
             if not st.session_state.insumos.empty:
                 for _, insumo in st.session_state.insumos.iterrows(): labels.append(f"Insumo: {insumo['Nombre']}")
@@ -395,56 +405,86 @@ elif page == "🚀 4. Optimización y Resultados":
             else:
                 st.error("Error al mostrar el uso de recursos. La optimización pudo haber fallado parcialmente o los datos de las restricciones no coinciden con las etiquetas.")
 
-elif page == "🧠 5. Análisis con IA":
-    st.header("5. Análisis con IA y Contexto de Mercado")
-    st.info("Utiliza Llama 3.1 para obtener insights sobre tus resultados de optimización y el contexto del mercado.")
+elif page == "🧠 5. Análisis con IA (Chat)": # CAMBIADO: Nuevo nombre de página
+    st.header("🤖 Chat de Análisis Cualitativo")
+    st.markdown("""
+    Sube informes, noticias o pega texto para analizar. Pregunta a la IA sobre el sentimiento, los puntos clave,
+    los riesgos mencionados o el posible impacto en tu estrategia.
+    """)
 
-    if 'resultados_optimizacion' not in st.session_state or not st.session_state.resultados_optimizacion: 
-        st.warning("Ejecuta la optimización primero para generar un análisis con IA.")
-    else:
-        st.subheader("1. (Opcional) Cargar Archivo de Contexto")
-        uploaded_file = st.file_uploader("Sube un PDF con análisis de mercado, precios de competidores, etc.", type="pdf")
-        market_context = ""
-        if uploaded_file is not None:
-            try:
-                pdf_reader = PdfReader(io.BytesIO(uploaded_file.getvalue()))
-                for page in pdf_reader.pages:
-                    market_context += page.extract_text() + "\n"
-                st.success("PDF procesado con éxito.")
-                with st.expander("Ver texto extraído del PDF"):
-                    st.text_area("", market_context, height=200)
-            except Exception as e:
-                st.error(f"Error al leer el PDF: {e}")
+    # Widgets para subir documentos y pegar texto (en la barra lateral, como lo tenías)
+    with st.sidebar:
+        st.subheader("Contexto para el Chat de Insights")
+        uploaded_pdfs = st.file_uploader(
+            "Sube PDFs (noticias, informes, etc.)", type="pdf", accept_multiple_files=True, key="insights_pdf"
+        )
+        pasted_text = st.text_area("O pega texto aquí", height=150, key="insights_text_area")
 
-        st.subheader("2. Generar Insight")
-        
-        res = st.session_state.resultados_optimizacion
-        costs = st.session_state.costos_variables
-        
-        beneficio_neto = 0 # Valor por defecto
-        if res.x is not None and len(res.x) == len(costs['insumos']) and len(res.x) == len(costs['personal']):
-            beneficio_bruto = -res.fun
-            costo_total_variable = np.dot(res.x, costs['insumos']) + np.dot(res.x, costs['personal'])
-            tasa_capital = st.session_state.params.get('costo_capital', 0) / 100
-            costo_financiero = costo_total_variable * tasa_capital
-            beneficio_neto = beneficio_bruto - costo_financiero
-        else:
-            st.error("No se pudo calcular el Beneficio Neto para la IA debido a inconsistencias en los resultados de optimización. Ejecuta la optimización de nuevo.")
-        
-        contexto_interno = f"Resultados de Optimización:\n- Beneficio Neto Final: ${beneficio_neto:,.2f}\n\nProducción Óptima:\n{st.session_state.produccion_optima.to_string()}\n\nUso de Recursos (Cuellos de Botella):\n{st.session_state.uso_recursos.to_string()}"
-        
-        contexto_completo = contexto_interno
-        if market_context:
-            contexto_completo += f"\n\nAnálisis de Mercado (del PDF):\n{market_context}"
+    # Mostrar historial de chat
+    for message in st.session_state.insights_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-        st.text_area("Contexto final enviado a la IA:", contexto_completo, height=300)
-        pregunta = st.text_input("Haz tu pregunta:", "Basado en los datos de optimización y el contexto de mercado, ¿cuál debería ser mi principal foco estratégico?")
-        
-        if st.button("Obtener Insight con Llama 3.1", type="primary"):
-            if not hf_api_key or hf_api_key == "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxx":
-                st.error("Por favor, configura tu API Key de Hugging Face en la barra lateral.")
-            else:
-                with st.spinner("Llama 3.1 está pensando..."):
-                    respuesta = call_llama_api(hf_api_key, contexto_completo, pregunta)
-                    st.success("Análisis recibido:")
-                    st.markdown(respuesta)
+    # Input del usuario
+    if prompt := st.chat_input("Pregunta sobre los documentos o el texto..."):
+        # Añadir mensaje del usuario al historial
+        st.session_state.insights_messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Preparar la respuesta de la IA
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            with st.spinner("Analizando y pensando..."):
+                # 1. Recopilar todo el contexto de texto
+                context_text = ""
+                if uploaded_pdfs:
+                    for pdf in uploaded_pdfs:
+                        context_text += f"--- INICIO DEL DOCUMENTO: {pdf.name} ---\n"
+                        context_text += extract_text_from_pdf(pdf)
+                        context_text += f"\n--- FIN DEL DOCUMENTO: {pdf.name} ---\n\n"
+                if pasted_text:
+                    context_text += f"--- INICIO DEL TEXTO PEGADO ---\n"
+                    context_text += pasted_text
+                    context_text += f"\n--- FIN DEL TEXTO PEGADO ---\n\n"
+
+                # Si no hay contexto de mercado ni optimización, aún podemos usar el chat
+                # Pero si hay optimización, la añadimos al contexto
+                if 'resultados_optimizacion' in st.session_state and st.session_state.resultados_optimizacion:
+                    res = st.session_state.resultados_optimizacion
+                    costs = st.session_state.costos_variables
+                    
+                    beneficio_neto = 0 
+                    if res.x is not None and len(res.x) == len(costs['insumos']) and len(res.x) == len(costs['personal']):
+                        beneficio_bruto = -res.fun
+                        costo_total_variable = np.dot(res.x, costs['insumos']) + np.dot(res.x, costs['personal'])
+                        tasa_capital = st.session_state.params.get('costo_capital', 0) / 100
+                        costo_financiero = costo_total_variable * tasa_capital
+                        beneficio_neto = beneficio_bruto - costo_financiero
+
+                    contexto_optimizacion = f"\n\n**Resultados de Optimización (Previamente Calculados):**\n- Beneficio Neto Final: ${beneficio_neto:,.2f}\n\nProducción Óptima:\n{st.session_state.produccion_optima.to_string()}\n\nUso de Recursos (Cuellos de Botella):\n{st.session_state.uso_recursos.to_string()}"
+                    context_text = contexto_optimizacion + "\n\n" + context_text # Añadir los resultados al principio del contexto
+
+                # 2. Construir el prompt final con la plantilla de Llama 3.1
+                system_prompt_llama = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+Eres un analista financiero experto y consultor de negocios. Tu tarea es analizar los documentos y textos proporcionados, así como los resultados de optimización empresarial. Responde a la pregunta del usuario. Enfócate en identificar el sentimiento (positivo, negativo, neutro), los puntos clave, los riesgos potenciales y cómo la información podría afectar la estrategia o el valor de la empresa. Sé conciso, objetivo y basa tus respuestas únicamente en la información proporcionada.
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+"""
+                final_prompt_for_api = f"{system_prompt_llama}**Documentos y Textos de Contexto:**\n{context_text}\n\n**Pregunta del Usuario:**\n{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+
+                # 3. Llamar a la API
+                response = get_hf_response(
+                    st.session_state.hf_api_key,
+                    st.session_state.hf_model,
+                    final_prompt_for_api, # Usamos el prompt ya formateado para Llama 3.1
+                    st.session_state.hf_temp
+                )
+
+                # 4. Mostrar respuesta
+                if response:
+                    message_placeholder.markdown(response)
+                    st.session_state.insights_messages.append({"role": "assistant", "content": response})
+                else:
+                    message_placeholder.markdown("No pude procesar la solicitud. Revisa la API Key, los logs o el contexto proporcionado.")
+                    st.session_state.insights_messages.append({"role": "assistant", "content": "Error en la solicitud."})
