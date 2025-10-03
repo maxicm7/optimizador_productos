@@ -64,10 +64,8 @@ def optimizar_produccion(productos, insumos, equipos, personal, recetas, params)
     if num_productos == 0: return None, "No se han definido productos para optimizar.", None, None, None
     if recetas.empty: return None, "No se han definido recetas para los productos.", None, None, None
     
-    # Asegurarse de que los DataFrames de recursos no estén vacíos antes de usarlos
-    if insumos.empty: return None, "No se han definido insumos.", None, None, None
-    if equipos.empty: return None, "No se han definido equipos.", None, None, None
-    if personal.empty: return None, "No se ha definido personal.", None, None, None
+    if insumos.empty or equipos.empty or personal.empty: 
+        return None, "Faltan definiciones de Insumos, Equipos o Personal en la Configuración de Recursos.", None, None, None
 
     costo_insumos_por_producto = []
     costo_personal_por_producto = []
@@ -82,15 +80,11 @@ def optimizar_produccion(productos, insumos, equipos, personal, recetas, params)
                 if not insumo_data.empty:
                     costo_insumo_unitario = insumo_data['Costo Unitario'].values[0]
                     costo_i += item_receta['Cantidad'] * costo_insumo_unitario
-                else:
-                    st.warning(f"Insumo '{item_receta['Recurso']}' en receta de '{prod['Nombre']}' no encontrado. Se ignorará.")
             elif item_receta['Tipo'] == 'Personal':
                 personal_data = personal[personal['Rol'] == item_receta['Recurso']]
                 if not personal_data.empty:
                     costo_hora_personal = personal_data['Costo por Hora'].values[0]
                     costo_p += item_receta['Cantidad'] * costo_hora_personal
-                else:
-                    st.warning(f"Personal '{item_receta['Recurso']}' en receta de '{prod['Nombre']}' no encontrado. Se ignorará.")
         
         costo_insumos_por_producto.append(costo_i)
         costo_personal_por_producto.append(costo_p)
@@ -103,34 +97,19 @@ def optimizar_produccion(productos, insumos, equipos, personal, recetas, params)
 
     # Restricciones de Insumos
     for _, insumo in insumos.iterrows():
-        row = []
-        for _, prod in productos.iterrows():
-            cantidad_insumo_receta = recetas[(recetas['Producto'] == prod['Nombre']) & 
-                                             (recetas['Recurso'] == insumo['Nombre']) & 
-                                             (recetas['Tipo'] == 'Insumo')]['Cantidad'].sum()
-            row.append(cantidad_insumo_receta)
+        row = [recetas[(recetas['Producto'] == prod['Nombre']) & (recetas['Recurso'] == insumo['Nombre']) & (recetas['Tipo'] == 'Insumo')]['Cantidad'].sum() for _, prod in productos.iterrows()]
         constraints_A.append(row)
         constraints_b.append(insumo['Cantidad Disponible'])
 
     # Restricciones de Equipos
     for _, equipo in equipos.iterrows():
-        row = []
-        for _, prod in productos.iterrows():
-            cantidad_equipo_receta = recetas[(recetas['Producto'] == prod['Nombre']) & 
-                                             (recetas['Recurso'] == equipo['Nombre']) & 
-                                             (recetas['Tipo'] == 'Equipo')]['Cantidad'].sum()
-            row.append(cantidad_equipo_receta)
+        row = [recetas[(recetas['Producto'] == prod['Nombre']) & (recetas['Recurso'] == equipo['Nombre']) & (recetas['Tipo'] == 'Equipo')]['Cantidad'].sum() for _, prod in productos.iterrows()]
         constraints_A.append(row)
         constraints_b.append(equipo['Horas Disponibles'])
 
     # Restricciones de Personal
     for _, p in personal.iterrows():
-        row = []
-        for _, prod in productos.iterrows():
-            cantidad_personal_receta = recetas[(recetas['Producto'] == prod['Nombre']) & 
-                                               (recetas['Recurso'] == p['Rol']) & 
-                                               (recetas['Tipo'] == 'Personal')]['Cantidad'].sum()
-            row.append(cantidad_personal_receta)
+        row = [recetas[(recetas['Producto'] == prod['Nombre']) & (recetas['Recurso'] == p['Rol']) & (recetas['Tipo'] == 'Personal')]['Cantidad'].sum() for _, prod in productos.iterrows()]
         constraints_A.append(row)
         constraints_b.append(p['Cantidad de Empleados'] * p['Horas por Empleado'])
     
@@ -164,16 +143,18 @@ def extract_text_from_pdf(uploaded_file):
 def get_hf_response(api_key, model_name, full_prompt, temperature=0.7, top_p=0.9, max_new_tokens=1024):
     """
     Llama a la API de Hugging Face con un prompt completo.
-    Adaptada para ser la función 'call_llama_api' que usabas, pero con el nombre 'get_hf_response'.
+    SOLUCIÓN CRÍTICA: Fuerza la conexión a la URL genérica de Inferencia para evitar 
+    redirecciones a proveedores de terceros (como Fireworks AI) que no soporten 'text-generation'.
     """
     if not api_key:
         return "Por favor, introduce tu API Key de Hugging Face en la barra lateral."
     
     try:
-        client = InferenceClient(token=api_key)
+        # Usamos la URL genérica de la API de Inferencia, esto previene la redirección a Fireworks AI
+        client = InferenceClient(token=api_key, base_url="https://api-inference.huggingface.co/models") 
         
         response = client.text_generation(
-            model=model_name,
+            model=model_name, 
             prompt=full_prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -181,7 +162,8 @@ def get_hf_response(api_key, model_name, full_prompt, temperature=0.7, top_p=0.9
         )
         return response
     except Exception as e:
-        return f"Error al contactar la API de Hugging Face: {e}. Asegúrate de que tu API Key sea válida y que el modelo '{model_name}' esté disponible para tu cuenta."
+        # Aquí se incluye el error para que el usuario pueda diagnosticar si es la clave, el modelo o el límite de tokens
+        return f"Error al contactar la API de Hugging Face: {e}. Revisa tu API Key y asegúrate de que el modelo '{model_name}' esté accesible."
 
 # --- Interfaz de la App ---
 st.title("💰 Optimizador de Rentabilidad Empresarial")
@@ -196,13 +178,12 @@ for key, df in initial_data.items():
 if "insights_messages" not in st.session_state:
     st.session_state.insights_messages = []
 if "hf_model" not in st.session_state:
-    st.session_state.hf_model = "meta-llama/Meta-Llama-3.1-8B-Instruct" # Modelo por defecto
+    st.session_state.hf_model = "meta-llama/Meta-Llama-3.1-8B-Instruct" 
 if "hf_temp" not in st.session_state:
-    st.session_state.hf_temp = 0.7 # Temperatura por defecto
+    st.session_state.hf_temp = 0.7 
 
 
 # --- Limpieza de Datos en cada Rerun ---
-# Se mantiene para limpiar recetas huérfanas si el usuario borra productos o recursos
 clean_up_data()
 
 # --- Barra Lateral y Navegación ---
@@ -215,7 +196,7 @@ try:
     st.sidebar.success("✅ API Key cargada desde Streamlit Secrets.")
 except:
     st.sidebar.warning("API Key de Hugging Face no encontrada en Streamlit Secrets.")
-    hf_api_key = st.sidebar.text_input("Ingresa tu Hugging Face API Key", type="password", help="Necesaria para el análisis con IA. Puedes obtenerla en huggingface.co/settings/tokens")
+    hf_api_key = st.sidebar.text_input("Ingresa tu Hugging Face API Key", type="password", help="Necesaria para el análisis con IA.")
     if not hf_api_key:
         st.sidebar.info("Por favor, introduce tu API Key para usar la función de IA.")
 
@@ -246,7 +227,6 @@ elif page == "📝 2. Definición de Procesos":
     st.header("2. Definición de Procesos (Recetas)")
     st.info("Define los recursos (insumos, equipos, personal) que cada producto necesita y en qué cantidad.")
 
-    # Pre-calculamos las opciones para los selectbox individuales
     productos_validos = list(st.session_state.productos['Nombre'].unique())
     tipos_recurso_validos = ['Insumo', 'Equipo', 'Personal']
 
@@ -301,7 +281,7 @@ elif page == "📝 2. Definición de Procesos":
     st.divider()
 
     st.subheader("Editar o Eliminar Recetas Existentes")
-    st.info("Puedes editar directamente las cantidades o eliminar filas. Asegúrate de que los nombres de Producto, Tipo y Recurso sean exactos a los que definiste en la sección 'Configuración de Recursos'. Cualquier receta con un producto o recurso inválido será limpiada automáticamente.")
+    st.info("Puedes editar directamente las cantidades o eliminar filas. Asegúrate de que los nombres sean exactos.")
     
     st.session_state.recetas = st.data_editor(
         st.session_state.recetas,
@@ -340,10 +320,8 @@ elif page == "🚀 4. Optimización y Resultados":
                 )
             if msg: 
                 st.error(f"Error en la optimización: {msg}")
-                if 'resultados_optimizacion' in st.session_state:
-                    del st.session_state.resultados_optimizacion
-                if 'produccion_optima' in st.session_state:
-                    del st.session_state.produccion_optima
+                if 'resultados_optimizacion' in st.session_state: del st.session_state.resultados_optimizacion
+                if 'produccion_optima' in st.session_state: del st.session_state.produccion_optima
             else:
                 st.success("¡Optimización completada!")
                 st.session_state.resultados_optimizacion, st.session_state.A_ub, st.session_state.b_ub, st.session_state.costos_variables = res, A, b, costs
@@ -354,13 +332,13 @@ elif page == "🚀 4. Optimización y Resultados":
                     st.error("Error al generar el plan de producción. Los resultados de la optimización pueden ser inválidos o los datos inconsistentes.")
                     if 'produccion_optima' in st.session_state: del st.session_state.produccion_optima
 
-    if 'resultados_optimizacion' in st.session_state and st.session_state.resultados_optimizacion: # Verificar que haya resultados válidos
+    if 'resultados_optimizacion' in st.session_state and st.session_state.resultados_optimizacion: 
         res, costs = st.session_state.resultados_optimizacion, st.session_state.costos_variables
         
         beneficio_bruto = -res.fun
         
         if res.x is None or len(res.x) != len(costs['insumos']) or len(res.x) != len(costs['personal']):
-            st.error("Error: La longitud de los resultados de producción no coincide con los costos unitarios. Por favor, revisa tus recetas y la configuración de recursos.")
+            st.error("Error: La longitud de los resultados de producción no coincide con los costos unitarios. Revisa tus datos.")
             beneficio_neto = 0 
             costo_financiero = 0
         else:
@@ -403,16 +381,16 @@ elif page == "🚀 4. Optimización y Resultados":
                 st.dataframe(df_uso.sort_values(by='Uso (%)', ascending=False), use_container_width=True)
                 st.session_state.uso_recursos = df_uso
             else:
-                st.error("Error al mostrar el uso de recursos. La optimización pudo haber fallado parcialmente o los datos de las restricciones no coinciden con las etiquetas.")
+                st.error("Error al mostrar el uso de recursos.")
 
-elif page == "🧠 5. Análisis con IA (Chat)": # CAMBIADO: Nuevo nombre de página
+
+elif page == "🧠 5. Análisis con IA (Chat)": 
     st.header("🤖 Chat de Análisis Cualitativo")
     st.markdown("""
     Sube informes, noticias o pega texto para analizar. Pregunta a la IA sobre el sentimiento, los puntos clave,
     los riesgos mencionados o el posible impacto en tu estrategia.
     """)
 
-    # Widgets para subir documentos y pegar texto (en la barra lateral, como lo tenías)
     with st.sidebar:
         st.subheader("Contexto para el Chat de Insights")
         uploaded_pdfs = st.file_uploader(
@@ -420,24 +398,21 @@ elif page == "🧠 5. Análisis con IA (Chat)": # CAMBIADO: Nuevo nombre de pág
         )
         pasted_text = st.text_area("O pega texto aquí", height=150, key="insights_text_area")
 
-    # Mostrar historial de chat
     for message in st.session_state.insights_messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # Input del usuario
-    if prompt := st.chat_input("Pregunta sobre los documentos o el texto..."):
-        # Añadir mensaje del usuario al historial
+    if prompt := st.chat_input("Pregunta sobre los documentos o la optimización..."):
         st.session_state.insights_messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Preparar la respuesta de la IA
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
             with st.spinner("Analizando y pensando..."):
-                # 1. Recopilar todo el contexto de texto
                 context_text = ""
+                
+                # 1. Recopilar contexto de Mercado/Documentos
                 if uploaded_pdfs:
                     for pdf in uploaded_pdfs:
                         context_text += f"--- INICIO DEL DOCUMENTO: {pdf.name} ---\n"
@@ -448,8 +423,8 @@ elif page == "🧠 5. Análisis con IA (Chat)": # CAMBIADO: Nuevo nombre de pág
                     context_text += pasted_text
                     context_text += f"\n--- FIN DEL TEXTO PEGADO ---\n\n"
 
-                # Si no hay contexto de mercado ni optimización, aún podemos usar el chat
-                # Pero si hay optimización, la añadimos al contexto
+                # 2. Recopilar Resultados de Optimización (si existen)
+                contexto_optimizacion = ""
                 if 'resultados_optimizacion' in st.session_state and st.session_state.resultados_optimizacion:
                     res = st.session_state.resultados_optimizacion
                     costs = st.session_state.costos_variables
@@ -462,29 +437,35 @@ elif page == "🧠 5. Análisis con IA (Chat)": # CAMBIADO: Nuevo nombre de pág
                         costo_financiero = costo_total_variable * tasa_capital
                         beneficio_neto = beneficio_bruto - costo_financiero
 
-                    contexto_optimizacion = f"\n\n**Resultados de Optimización (Previamente Calculados):**\n- Beneficio Neto Final: ${beneficio_neto:,.2f}\n\nProducción Óptima:\n{st.session_state.produccion_optima.to_string()}\n\nUso de Recursos (Cuellos de Botella):\n{st.session_state.uso_recursos.to_string()}"
-                    context_text = contexto_optimizacion + "\n\n" + context_text # Añadir los resultados al principio del contexto
+                        if 'produccion_optima' in st.session_state and 'uso_recursos' in st.session_state:
+                            contexto_optimizacion = f"\n\n**Resultados de Optimización:**\n- Beneficio Neto Final: ${beneficio_neto:,.2f}\n\nProducción Óptima:\n{st.session_state.produccion_optima.to_string()}\n\nUso de Recursos (Cuellos de Botella):\n{st.session_state.uso_recursos.to_string()}"
+                        else:
+                            contexto_optimizacion = "\n\n**Resultados de Optimización:** (No disponibles o inválidos para incluir en el contexto)"
 
-                # 2. Construir el prompt final con la plantilla de Llama 3.1
+                # 3. Construir el prompt final con la plantilla de Llama 3.1
                 system_prompt_llama = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-Eres un analista financiero experto y consultor de negocios. Tu tarea es analizar los documentos y textos proporcionados, así como los resultados de optimización empresarial. Responde a la pregunta del usuario. Enfócate en identificar el sentimiento (positivo, negativo, neutro), los puntos clave, los riesgos potenciales y cómo la información podría afectar la estrategia o el valor de la empresa. Sé conciso, objetivo y basa tus respuestas únicamente en la información proporcionada.
+Eres un analista financiero experto y consultor de negocios. Tu tarea es analizar los documentos y textos proporcionados, y los resultados de optimización. Responde a la pregunta del usuario.
 <|eot_id|><|start_header_id|>user<|end_header_id|>
 """
-                final_prompt_for_api = f"{system_prompt_llama}**Documentos y Textos de Contexto:**\n{context_text}\n\n**Pregunta del Usuario:**\n{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+                
+                # Juntar todo el contexto
+                full_context_for_ai = contexto_optimizacion + "\n\n" + context_text
+                
+                final_prompt_for_api = f"{system_prompt_llama}**Contexto de la Empresa y Mercado:**\n{full_context_for_ai}\n\n**Pregunta del Usuario:**\n{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
 
-                # 3. Llamar a la API
+                # 4. Llamar a la API
                 response = get_hf_response(
                     st.session_state.hf_api_key,
                     st.session_state.hf_model,
-                    final_prompt_for_api, # Usamos el prompt ya formateado para Llama 3.1
+                    final_prompt_for_api,
                     st.session_state.hf_temp
                 )
 
-                # 4. Mostrar respuesta
-                if response:
+                # 5. Mostrar respuesta
+                if response and not response.startswith("Error al contactar la API"):
                     message_placeholder.markdown(response)
                     st.session_state.insights_messages.append({"role": "assistant", "content": response})
                 else:
-                    message_placeholder.markdown("No pude procesar la solicitud. Revisa la API Key, los logs o el contexto proporcionado.")
-                    st.session_state.insights_messages.append({"role": "assistant", "content": "Error en la solicitud."})
+                    message_placeholder.markdown(f"**Error de IA:** {response}")
+                    st.session_state.insights_messages.append({"role": "assistant", "content": f"Error en la solicitud: {response}"})
