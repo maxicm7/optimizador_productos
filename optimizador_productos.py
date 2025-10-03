@@ -12,7 +12,6 @@ st.set_page_config(
 )
 
 # --- Funciones Auxiliares ---
-# (La función optimizar_produccion no necesita cambios)
 def optimizar_produccion(productos, insumos, equipos, personal, recetas, params):
     num_productos = len(productos)
     if num_productos == 0: return None, "No se han definido productos para optimizar.", None, None, None
@@ -55,24 +54,35 @@ def optimizar_produccion(productos, insumos, equipos, personal, recetas, params)
 
 def call_huggingface_rag(api_key, context, question):
     """
-    ### SOLUCIÓN DEFINITIVA ERROR 1 ###
-    Cambiamos al método `conversational` que es el que la API de Hugging Face espera
-    para estos modelos de chat/instrucciones.
+    ### SOLUCIÓN DEFINITIVA ERROR 1 y 3 ###
+    Usamos el método correcto (`text_generation`) con el formato de prompt que el modelo espera.
     """
     if not api_key:
         return "Por favor, introduce tu API Key de Hugging Face."
     try:
         client = InferenceClient(token=api_key)
-        # Creamos el prompt como un único bloque de texto para la conversación
-        prompt = f"{context}\n\n**Pregunta:**\n{question}"
         
-        # Usamos el método conversacional
-        response = client.conversational(
-            text=prompt,
-            model="HuggingFaceH4/zephyr-7b-beta"
+        # Formato de chat específico para Zephyr y modelos similares
+        prompt = f"""<|system|>
+Eres un consultor de negocios experto. Analiza el siguiente contexto y responde la pregunta de forma clara y concisa.</s>
+<|user|>
+**Contexto:**
+{context}
+
+**Pregunta:**
+{question}</s>
+<|assistant|>
+"""
+        
+        response = client.text_generation(
+            model="HuggingFaceH4/zephyr-7b-beta",
+            prompt=prompt,
+            max_new_tokens=512,
+            temperature=0.7,
+            top_p=0.95,
+            repetition_penalty=1.2,
         )
-        # La respuesta es un diccionario, extraemos el texto generado
-        return response.get('generated_text', "No se pudo obtener una respuesta del modelo.")
+        return response
     except Exception as e:
         return f"Error al contactar la API de Hugging Face: {e}"
 
@@ -104,8 +114,7 @@ if 'personal' not in st.session_state:
 if 'recetas' not in st.session_state:
     st.session_state.recetas = pd.DataFrame({
         'Producto': ['Producto A', 'Producto A', 'Producto A', 'Producto B', 'Producto B', 'Producto B'],
-        'Tipo': ['Insumo', 'Equipo', 'Personal', 'Insumo', 'Equipo', 'Personal'],
-        'Recurso': ['Insumo X', 'Máquina 1', 'Operario', 'Insumo Y', 'Máquina 2', 'Operario'],
+        'Tipo': ['Insumo', 'Equipo', 'Personal', 'Recurso': ['Insumo X', 'Máquina 1', 'Operario', 'Insumo Y', 'Máquina 2', 'Operario'],
         'Cantidad': [2.0, 0.5, 1.0, 3.0, 0.2, 1.5]})
 if 'params' not in st.session_state:
     st.session_state.params = {'iibb': 3.5, 'costo_capital': 8.0}
@@ -113,9 +122,21 @@ if 'params' not in st.session_state:
 # --- Contenido de las Páginas ---
 if page == "⚙️ 1. Configuración de Recursos":
     st.header("1. Configuración de Recursos")
+    st.markdown("Define los elementos básicos de tu operación. Puedes agregar, editar o eliminar filas.")
+    
+    # ### SOLUCIÓN DEFINITIVA ERROR 1 ###
+    # Simplemente llamamos a los editores. El `key` se encarga de actualizar st.session_state.
+    # No hacemos `st.session_state.productos = st.data_editor(...)`
+    st.subheader("A. Productos o Servicios")
     st.data_editor(st.session_state.productos, num_rows="dynamic", key="productos")
+    
+    st.subheader("B. Insumos / Materias Primas")
     st.data_editor(st.session_state.insumos, num_rows="dynamic", key="insumos")
+    
+    st.subheader("C. Equipos / Maquinaria")
     st.data_editor(st.session_state.equipos, num_rows="dynamic", key="equipos")
+    
+    st.subheader("D. Personal")
     st.data_editor(st.session_state.personal, num_rows="dynamic", key="personal")
 
 elif page == "📝 2. Definición de Procesos":
@@ -125,12 +146,14 @@ elif page == "📝 2. Definición de Procesos":
     # 1. Obtenemos la lista de productos que existen AHORA.
     productos_validos = st.session_state.productos['Nombre'].unique()
     
-    # 2. Creamos una copia del DataFrame de recetas que SÓLO contiene productos válidos.
-    recetas_filtradas = st.session_state.recetas[st.session_state.recetas['Producto'].isin(productos_validos)]
+    # 2. Filtramos el DataFrame de recetas en st.session_state para eliminar las que ya no son válidas.
+    # Esta es una operación de limpieza de datos que se ejecuta antes de renderizar el widget.
+    st.session_state.recetas = st.session_state.recetas[st.session_state.recetas['Producto'].isin(productos_validos)]
 
-    # 3. Pasamos esta copia segura al data_editor y guardamos el resultado de vuelta en el estado.
-    st.session_state.recetas = st.data_editor(
-        recetas_filtradas, # Usamos la copia filtrada
+    # 3. Ahora que el estado está limpio, llamamos al editor.
+    # De nuevo, no asignamos su resultado, el `key` se encarga de las actualizaciones.
+    st.data_editor(
+        st.session_state.recetas,
         num_rows="dynamic",
         key="editor_recetas",
         column_config={
@@ -159,7 +182,6 @@ elif page == "🚀 4. Optimización y Resultados":
             st.session_state.produccion_optima = pd.DataFrame({'Producto': st.session_state.productos['Nombre'], 'Cantidad a Producir': res.x})
 
     if 'resultados_optimizacion' in st.session_state:
-        # (El código de esta sección para mostrar resultados no cambia)
         res = st.session_state.resultados_optimizacion
         costs = st.session_state.costos_variables
         beneficio_bruto = -res.fun
@@ -195,7 +217,6 @@ elif page == "🧠 5. Análisis con IA":
     st.header("5. Análisis con IA (RAG)")
     if 'resultados_optimizacion' not in st.session_state: st.warning("Ejecuta la optimización primero.")
     else:
-        # (El código de esta sección para el contexto de la IA no cambia)
         beneficio_bruto = -st.session_state.resultados_optimizacion.fun
         costo_total = np.dot(st.session_state.resultados_optimizacion.x, st.session_state.costos_variables['insumos']) + np.dot(st.session_state.resultados_optimizacion.x, st.session_state.costos_variables['personal'])
         tasa_capital = st.session_state.params.get('costo_capital', 0) / 100
