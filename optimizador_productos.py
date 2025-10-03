@@ -17,15 +17,30 @@ st.set_page_config(
 
 def clean_up_data():
     """
-    ### SOLUCIÓN DEFINITIVA AL ValueError ###
-    Esta función se ejecuta en cada recarga para asegurar la consistencia de los datos.
-    Elimina recetas de productos que ya no existen.
+    ### SOLUCIÓN DEFINITIVA AL ValueError de data_editor ###
+    Esta función se ejecuta en cada recarga para:
+    1. Detectar si la lista de productos ha cambiado (añadido o eliminado).
+    2. Si cambió, incrementa un contador para forzar el reseteo del widget 'data_editor' de recetas.
+    3. Elimina recetas de productos que ya no existen para mantener la consistencia.
     """
     if 'productos' in st.session_state and 'recetas' in st.session_state:
-        productos_validos = st.session_state.productos['Nombre'].unique()
+        # 1. Detectar si la lista de productos ha cambiado
+        productos_actuales = set(st.session_state.productos['Nombre'].unique())
+        
+        if 'last_known_products' not in st.session_state:
+            st.session_state.last_known_products = set()
+
+        if productos_actuales != st.session_state.last_known_products:
+            # 2. Incrementar el contador si la lista cambió
+            st.session_state.recipe_editor_key_counter += 1
+            st.session_state.last_known_products = productos_actuales
+            
+        # 3. Limpiar recetas huérfanas
+        productos_validos = list(productos_actuales)
         recetas_actuales = st.session_state.recetas
         recetas_limpias = recetas_actuales[recetas_actuales['Producto'].isin(productos_validos)]
         st.session_state.recetas = recetas_limpias
+
 
 def optimizar_produccion(productos, insumos, equipos, personal, recetas, params):
     # (Esta función ya es robusta y no necesita cambios)
@@ -68,16 +83,12 @@ def optimizar_produccion(productos, insumos, equipos, personal, recetas, params)
     else: return None, resultado.message, None, None, None
 
 def call_llama_api(api_key, context, question):
-    """
-    ### SOLUCIÓN DEFINITIVA API ###
-    Usa el modelo Llama 3.1 con su plantilla de prompt oficial.
-    """
+    # (Esta función ya es robusta y no necesita cambios)
     if not api_key:
         return "Por favor, introduce tu API Key de Hugging Face."
     try:
         client = InferenceClient(token=api_key)
         
-        # Plantilla oficial para Llama 3.1 Instruct
         prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 Eres un consultor de negocios experto. Analiza el contexto proporcionado que incluye datos de optimización y un análisis de mercado. Responde la pregunta del usuario de forma clara, concisa y ofreciendo recomendaciones accionables.<|eot_id|><|start_header_id|>user<|end_header_id|>
@@ -106,7 +117,6 @@ st.title("💰 Optimizador de Rentabilidad Empresarial")
 # --- Inicialización de Datos ---
 if 'productos' not in st.session_state:
     st.session_state.productos = pd.DataFrame({'Nombre': ['Producto A', 'Producto B'], 'Demanda Máxima': [100.0, 150.0], 'Precio de Venta': [50.0, 75.0]})
-# ... (resto de inicializaciones)
 if 'insumos' not in st.session_state:
     st.session_state.insumos = pd.DataFrame({'Nombre': ['Insumo X', 'Insumo Y'], 'Cantidad Disponible': [500.0, 800.0], 'Costo Unitario': [5.0, 8.0]})
 if 'equipos' not in st.session_state:
@@ -122,6 +132,12 @@ if 'recetas' not in st.session_state:
     })
 if 'params' not in st.session_state:
     st.session_state.params = {'iibb': 3.5, 'costo_capital': 8.0}
+
+# --- NUEVO: Inicialización para el key dinámico ---
+if 'recipe_editor_key_counter' not in st.session_state:
+    st.session_state.recipe_editor_key_counter = 0
+if 'last_known_products' not in st.session_state:
+    st.session_state.last_known_products = set(st.session_state.productos['Nombre'].unique())
 
 # --- Limpieza de Datos en cada Rerun ---
 clean_up_data()
@@ -151,16 +167,26 @@ if page == "⚙️ 1. Configuración de Recursos":
 
 elif page == "📝 2. Definición de Procesos":
     st.header("2. Definición de Procesos (Recetas)")
-    productos_validos = st.session_state.productos['Nombre'].unique()
+
+    # Pre-calculamos las opciones para que el código sea más limpio
+    productos_validos = list(st.session_state.productos['Nombre'].unique())
+    recursos_validos = list(pd.concat([
+        st.session_state.insumos['Nombre'], 
+        st.session_state.equipos['Nombre'], 
+        st.session_state.personal['Rol']
+    ]).unique())
+
+    # --- NUEVO: Usamos el key dinámico para resetear el widget cuando sea necesario ---
+    editor_key = f"editor_recetas_{st.session_state.recipe_editor_key_counter}"
+
     st.data_editor(
         st.session_state.recetas,
         num_rows="dynamic",
-        key="editor_recetas",
+        key=editor_key, # <--- CAMBIO CLAVE AQUÍ
         column_config={
             "Producto": st.column_config.SelectboxColumn("Producto", options=productos_validos, required=True),
             "Tipo": st.column_config.SelectboxColumn("Tipo", options=['Insumo', 'Equipo', 'Personal'], required=True),
-            "Recurso": st.column_config.SelectboxColumn("Recurso", options=pd.concat([
-                st.session_state.insumos['Nombre'], st.session_state.equipos['Nombre'], st.session_state.personal['Rol']]).unique(), required=True),
+            "Recurso": st.column_config.SelectboxColumn("Recurso", options=recursos_validos, required=True),
         }
     )
 
@@ -180,7 +206,6 @@ elif page == "🚀 4. Optimización y Resultados":
             st.session_state.resultados_optimizacion, st.session_state.A_ub, st.session_state.b_ub, st.session_state.costos_variables = res, A, b, costs
             st.session_state.produccion_optima = pd.DataFrame({'Producto': st.session_state.productos['Nombre'], 'Cantidad a Producir': res.x})
     if 'resultados_optimizacion' in st.session_state:
-        # (código para mostrar resultados sin cambios)
         res, costs = st.session_state.resultados_optimizacion, st.session_state.costos_variables
         beneficio_bruto = -res.fun
         costo_total = np.dot(res.x, costs['insumos']) + np.dot(res.x, costs['personal'])
@@ -201,7 +226,6 @@ elif page == "🧠 5. Análisis con IA":
     st.header("5. Análisis con IA y Contexto de Mercado")
     if 'resultados_optimizacion' not in st.session_state: st.warning("Ejecuta la optimización primero.")
     else:
-        # ### NUEVA FUNCIONALIDAD: CARGA DE PDF ###
         st.subheader("1. (Opcional) Cargar Archivo de Contexto")
         uploaded_file = st.file_uploader("Sube un PDF con análisis de mercado, precios de competidores, etc.", type="pdf")
         market_context = ""
@@ -216,7 +240,6 @@ elif page == "🧠 5. Análisis con IA":
             except Exception as e:
                 st.error(f"Error al leer el PDF: {e}")
 
-        # Construcción del contexto para la IA
         st.subheader("2. Generar Insight")
         beneficio_neto = -st.session_state.resultados_optimizacion.fun - (np.dot(st.session_state.resultados_optimizacion.x, st.session_state.costos_variables['insumos']) + np.dot(st.session_state.resultados_optimizacion.x, st.session_state.costos_variables['personal'])) * (st.session_state.params.get('costo_capital', 0) / 100)
         
