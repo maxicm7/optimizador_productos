@@ -114,8 +114,8 @@ if 'personal' not in st.session_state:
 if 'recetas' not in st.session_state:
     st.session_state.recetas = pd.DataFrame({
         'Producto': ['Producto A', 'Producto A', 'Producto A', 'Producto B', 'Producto B', 'Producto B'],
-        'Tipo': ['Insumo', 'Equipo', 'Personal', 'Recurso': ['Insumo X', 'Máquina 1', 'Operario', 'Insumo Y', 'Máquina 2', 'Operario']],
-        'Cantidad': [2.0, 0.5, 1.0, 3.0, 0.2, 1.5]})
+        'Tipo': ['Insumo', 'Equipo', 'Personal', 'Recurso': ['Insumo X', 'Máquina 1', 'Operario', 'Insumo Y', 'Máquina 2', 'Operario'],
+        'Cantidad': 2.0, 0.5, 1.0, 3.0, 0.2, 1.5]})
 if 'params' not in st.session_state:
     st.session_state.params = {'iibb': 3.5, 'costo_capital': 8.0}
 
