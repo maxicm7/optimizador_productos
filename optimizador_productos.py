@@ -17,73 +17,127 @@ st.set_page_config(
 
 def clean_up_data():
     """
-    ### SOLUCIÓN DEFINITIVA AL ValueError de data_editor ###
-    Esta función se ejecuta en cada recarga para:
-    1. Detectar si la lista de productos ha cambiado (añadido o eliminado).
-    2. Si cambió, incrementa un contador para forzar el reseteo del widget 'data_editor' de recetas.
-    3. Elimina recetas de productos que ya no existen para mantener la consistencia.
+    Esta función se ejecuta en cada recarga para limpiar y mantener la consistencia de los datos.
+    1. Limpia recetas de productos que ya no existen.
+    2. También limpia las recetas de recursos que ya no existen (insumos, equipos, personal).
     """
     if 'productos' in st.session_state and 'recetas' in st.session_state:
-        # 1. Detectar si la lista de productos ha cambiado
-        productos_actuales = set(st.session_state.productos['Nombre'].unique())
+        productos_validos = set(st.session_state.productos['Nombre'].unique())
+        insumos_validos = set(st.session_state.insumos['Nombre'].unique())
+        equipos_validos = set(st.session_state.equipos['Nombre'].unique())
+        personal_validos = set(st.session_state.personal['Rol'].unique())
         
-        if 'last_known_products' not in st.session_state:
-            st.session_state.last_known_products = set()
-
-        if productos_actuales != st.session_state.last_known_products:
-            # 2. Incrementar el contador si la lista cambió
-            st.session_state.recipe_editor_key_counter += 1
-            st.session_state.last_known_products = productos_actuales
-            
-        # 3. Limpiar recetas huérfanas
-        productos_validos = list(productos_actuales)
+        # Limpiar recetas de productos que ya no existen
         recetas_actuales = st.session_state.recetas
-        recetas_limpias = recetas_actuales[recetas_actuales['Producto'].isin(productos_validos)]
-        st.session_state.recetas = recetas_limpias
-
+        recetas_limpias_productos = recetas_actuales[recetas_actuales['Producto'].isin(productos_validos)]
+        
+        # Limpiar recetas de recursos que ya no existen (Insumo, Equipo, Personal)
+        recetas_limpias_recursos = recetas_limpias_productos[
+            (recetas_limpias_productos['Tipo'] == 'Insumo') & (recetas_limpias_productos['Recurso'].isin(insumos_validos)) |
+            (recetas_limpias_productos['Tipo'] == 'Equipo') & (recetas_limpias_productos['Recurso'].isin(equipos_validos)) |
+            (recetas_limpias_productos['Tipo'] == 'Personal') & (recetas_limpias_productos['Recurso'].isin(personal_validos))
+        ]
+        
+        st.session_state.recetas = recetas_limpias_recursos
 
 def optimizar_produccion(productos, insumos, equipos, personal, recetas, params):
-    # (Esta función ya es robusta y no necesita cambios)
     num_productos = len(productos)
     if num_productos == 0: return None, "No se han definido productos para optimizar.", None, None, None
+    
+    # Asegurarse de que 'recetas' no esté vacío y tenga las columnas esperadas
+    if recetas.empty: return None, "No se han definido recetas para los productos.", None, None, None
+    if not all(col in recetas.columns for col in ['Producto', 'Tipo', 'Recurso', 'Cantidad']):
+        return None, "El DataFrame de recetas no tiene las columnas esperadas.", None, None, None
+
     costo_insumos_por_producto, costo_personal_por_producto = [], []
     for i, prod in productos.iterrows():
         costo_i, costo_p = 0, 0
         receta_prod = recetas[recetas['Producto'] == prod['Nombre']]
+        
+        if receta_prod.empty:
+            # Si un producto no tiene receta, su costo unitario es 0
+            costo_insumos_por_producto.append(0)
+            costo_personal_por_producto.append(0)
+            continue # Pasar al siguiente producto
+
         for j, item_receta in receta_prod.iterrows():
             if item_receta['Tipo'] == 'Insumo':
-                costo_insumo_unitario = insumos[insumos['Nombre'] == item_receta['Recurso']]['Costo Unitario'].values[0]
-                costo_i += item_receta['Cantidad'] * costo_insumo_unitario
+                insumo_data = insumos[insumos['Nombre'] == item_receta['Recurso']]
+                if not insumo_data.empty:
+                    costo_insumo_unitario = insumo_data['Costo Unitario'].values[0]
+                    costo_i += item_receta['Cantidad'] * costo_insumo_unitario
+                else:
+                    st.warning(f"Insumo '{item_receta['Recurso']}' en receta de '{prod['Nombre']}' no encontrado.")
             elif item_receta['Tipo'] == 'Personal':
-                costo_hora_personal = personal[personal['Rol'] == item_receta['Recurso']]['Costo por Hora'].values[0]
-                costo_p += item_receta['Cantidad'] * costo_hora_personal
+                personal_data = personal[personal['Rol'] == item_receta['Recurso']]
+                if not personal_data.empty:
+                    costo_hora_personal = personal_data['Costo por Hora'].values[0]
+                    costo_p += item_receta['Cantidad'] * costo_hora_personal
+                else:
+                    st.warning(f"Personal '{item_receta['Recurso']}' en receta de '{prod['Nombre']}' no encontrado.")
         costo_insumos_por_producto.append(costo_i)
         costo_personal_por_producto.append(costo_p)
+    
+    # Manejar el caso donde no hay recetas para algunos productos o datos faltantes
+    if len(costo_insumos_por_producto) != num_productos:
+        return None, "Error en el cálculo de costos unitarios de productos. Verifica tus recetas y recursos.", None, None, None
+
     precio_venta_neto = productos['Precio de Venta'].values * (1 - params['iibb'] / 100)
     beneficio_unitario = precio_venta_neto - np.array(costo_insumos_por_producto) - np.array(costo_personal_por_producto)
     c = -beneficio_unitario
+
     constraints_A, constraints_b = [], []
+
+    # Restricciones de Insumos
     for _, insumo in insumos.iterrows():
-        row = [recetas[(recetas['Producto'] == prod['Nombre']) & (recetas['Recurso'] == insumo['Nombre']) & (recetas['Tipo'] == 'Insumo')]['Cantidad'].sum() for _, prod in productos.iterrows()]
-        constraints_A.append(row); constraints_b.append(insumo['Cantidad Disponible'])
+        row = []
+        for _, prod in productos.iterrows():
+            cantidad_insumo_receta = recetas[(recetas['Producto'] == prod['Nombre']) & 
+                                             (recetas['Recurso'] == insumo['Nombre']) & 
+                                             (recetas['Tipo'] == 'Insumo')]['Cantidad'].sum()
+            row.append(cantidad_insumo_receta)
+        constraints_A.append(row)
+        constraints_b.append(insumo['Cantidad Disponible'])
+
+    # Restricciones de Equipos
     for _, equipo in equipos.iterrows():
-        row = [recetas[(recetas['Producto'] == prod['Nombre']) & (recetas['Recurso'] == equipo['Nombre']) & (recetas['Tipo'] == 'Equipo')]['Cantidad'].sum() for _, prod in productos.iterrows()]
-        constraints_A.append(row); constraints_b.append(equipo['Horas Disponibles'])
+        row = []
+        for _, prod in productos.iterrows():
+            cantidad_equipo_receta = recetas[(recetas['Producto'] == prod['Nombre']) & 
+                                             (recetas['Recurso'] == equipo['Nombre']) & 
+                                             (recetas['Tipo'] == 'Equipo')]['Cantidad'].sum()
+            row.append(cantidad_equipo_receta)
+        constraints_A.append(row)
+        constraints_b.append(equipo['Horas Disponibles'])
+
+    # Restricciones de Personal
     for _, p in personal.iterrows():
-        row = [recetas[(recetas['Producto'] == prod['Nombre']) & (recetas['Recurso'] == p['Rol']) & (recetas['Tipo'] == 'Personal')]['Cantidad'].sum() for _, prod in productos.iterrows()]
-        constraints_A.append(row); constraints_b.append(p['Cantidad de Empleados'] * p['Horas por Empleado'])
+        row = []
+        for _, prod in productos.iterrows():
+            cantidad_personal_receta = recetas[(recetas['Producto'] == prod['Nombre']) & 
+                                               (recetas['Recurso'] == p['Rol']) & 
+                                               (recetas['Tipo'] == 'Personal')]['Cantidad'].sum()
+            row.append(cantidad_personal_receta)
+        constraints_A.append(row)
+        constraints_b.append(p['Cantidad de Empleados'] * p['Horas por Empleado'])
+    
+    # Restricciones de Demanda Máxima
     for i, prod in productos.iterrows():
-        row = np.zeros(num_productos); row[i] = 1
-        constraints_A.append(row); constraints_b.append(prod['Demanda Máxima'])
+        row = np.zeros(num_productos)
+        row[i] = 1
+        constraints_A.append(row)
+        constraints_b.append(prod['Demanda Máxima'])
+        
     A_ub, b_ub = np.array(constraints_A), np.array(constraints_b)
     bounds = [(0, None) for _ in range(num_productos)]
+
     resultado = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
     costos_variables = {'insumos': np.array(costo_insumos_por_producto), 'personal': np.array(costo_personal_por_producto)}
+    
     if resultado.success: return resultado, None, A_ub, b_ub, costos_variables
     else: return None, resultado.message, None, None, None
 
 def call_llama_api(api_key, context, question):
-    # (Esta función ya es robusta y no necesita cambios)
     if not api_key:
         return "Por favor, introduce tu API Key de Hugging Face."
     try:
@@ -133,13 +187,9 @@ if 'recetas' not in st.session_state:
 if 'params' not in st.session_state:
     st.session_state.params = {'iibb': 3.5, 'costo_capital': 8.0}
 
-# --- NUEVO: Inicialización para el key dinámico ---
-if 'recipe_editor_key_counter' not in st.session_state:
-    st.session_state.recipe_editor_key_counter = 0
-if 'last_known_products' not in st.session_state:
-    st.session_state.last_known_products = set(st.session_state.productos['Nombre'].unique())
 
 # --- Limpieza de Datos en cada Rerun ---
+# Esta función ahora también limpia recursos huérfanos, no solo productos.
 clean_up_data()
 
 # --- Barra Lateral y Navegación ---
@@ -150,7 +200,7 @@ try:
     hf_api_key = st.secrets["HF_API_KEY"]
     st.sidebar.success("✅ API Key cargada desde Secrets.")
 except:
-    st.sidebar.warning("API Key no encontrada en Secrets.")
+    st.sidebar.warning("API Key no encontrada en Secrets. Para usar Llama 3.1, la API Key es obligatoria.")
     hf_api_key = st.sidebar.text_input("Ingresa tu Hugging Face API Key", type="password")
 
 # --- Contenido de las Páginas ---
@@ -168,27 +218,67 @@ if page == "⚙️ 1. Configuración de Recursos":
 elif page == "📝 2. Definición de Procesos":
     st.header("2. Definición de Procesos (Recetas)")
 
-    # Pre-calculamos las opciones para que el código sea más limpio
+    # Pre-calculamos las opciones para los selectbox individuales
     productos_validos = list(st.session_state.productos['Nombre'].unique())
-    recursos_validos = list(pd.concat([
-        st.session_state.insumos['Nombre'], 
-        st.session_state.equipos['Nombre'], 
-        st.session_state.personal['Rol']
-    ]).unique())
+    tipos_recurso_validos = ['Insumo', 'Equipo', 'Personal']
 
-    # --- NUEVO: Usamos el key dinámico para resetear el widget cuando sea necesario ---
-    editor_key = f"editor_recetas_{st.session_state.recipe_editor_key_counter}"
+    # --- Sección para AGREGAR nuevas recetas ---
+    st.subheader("Agregar Nueva Receta")
+    with st.form("add_recipe_form"):
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            new_producto = st.selectbox("Producto", options=productos_validos, key="new_recipe_producto")
+        with col2:
+            new_tipo = st.selectbox("Tipo de Recurso", options=tipos_recurso_validos, key="new_recipe_tipo")
+        
+        recursos_disponibles = []
+        if new_tipo == 'Insumo':
+            recursos_disponibles = list(st.session_state.insumos['Nombre'].unique())
+        elif new_tipo == 'Equipo':
+            recursos_disponibles = list(st.session_state.equipos['Nombre'].unique())
+        elif new_tipo == 'Personal':
+            recursos_disponibles = list(st.session_state.personal['Rol'].unique())
 
-    st.data_editor(
+        with col3:
+            new_recurso = st.selectbox("Recurso Específico", options=recursos_disponibles, key="new_recipe_recurso", 
+                                       disabled=not bool(recursos_disponibles)) # Deshabilitar si no hay recursos
+        with col4:
+            new_cantidad = st.number_input("Cantidad", min_value=0.01, value=1.0, step=0.1, key="new_recipe_cantidad")
+        
+        if st.form_submit_button("Añadir Receta"):
+            if new_producto and new_tipo and new_recurso and new_cantidad > 0:
+                # Comprobar si ya existe una receta idéntica
+                if not st.session_state.recetas[(st.session_state.recetas['Producto'] == new_producto) &
+                                                (st.session_state.recetas['Tipo'] == new_tipo) &
+                                                (st.session_state.recetas['Recurso'] == new_recurso)].empty:
+                    st.warning("Esta receta ya existe. Edítala en la tabla de abajo si quieres cambiar la cantidad.")
+                else:
+                    new_row = pd.DataFrame([{'Producto': new_producto, 'Tipo': new_tipo, 'Recurso': new_recurso, 'Cantidad': new_cantidad}])
+                    st.session_state.recetas = pd.concat([st.session_state.recetas, new_row], ignore_index=True)
+                    st.success(f"Receta para {new_producto} añadida.")
+            else:
+                st.error("Por favor, rellena todos los campos para añadir la receta.")
+    
+    st.divider()
+
+    # --- Sección para EDITAR las recetas existentes ---
+    st.subheader("Editar Recetas Existentes")
+    # Mostrar el editor sin selectbox dinámicos en las columnas 'Producto', 'Tipo', 'Recurso'
+    # Esto evitará los problemas de estado interno cuando los productos/recursos cambien
+    st.session_state.recetas = st.data_editor(
         st.session_state.recetas,
         num_rows="dynamic",
-        key=editor_key, # <--- CAMBIO CLAVE AQUÍ
+        key="editor_recetas_final", # Un key fijo, ya que no tiene selectbox dinámicos
         column_config={
-            "Producto": st.column_config.SelectboxColumn("Producto", options=productos_validos, required=True),
-            "Tipo": st.column_config.SelectboxColumn("Tipo", options=['Insumo', 'Equipo', 'Personal'], required=True),
-            "Recurso": st.column_config.SelectboxColumn("Recurso", options=recursos_validos, required=True),
+            "Producto": st.column_config.Column("Producto", help="Producto al que aplica esta receta"),
+            "Tipo": st.column_config.Column("Tipo", help="Tipo de recurso (Insumo, Equipo, Personal)"),
+            "Recurso": st.column_config.Column("Recurso", help="Nombre del insumo, equipo o rol de personal"),
+            "Cantidad": st.column_config.NumberColumn("Cantidad", help="Cantidad necesaria por unidad de producto", min_value=0.01),
         }
     )
+
+    # Nota: Los campos de Producto, Tipo y Recurso en el data_editor se muestran como texto
+    # Si el usuario modifica el texto y este no existe en los recursos, la limpieza lo borrará o la optimización lo ignorará.
 
 elif page == "📈 3. Parámetros Financieros":
     st.header("3. Parámetros Financieros y de Mercado")
@@ -200,31 +290,66 @@ elif page == "🚀 4. Optimización y Resultados":
     if st.button("▶️ Ejecutar Optimización", type="primary"):
         with st.spinner("Calculando..."):
             res, msg, A, b, costs = optimizar_produccion(st.session_state.productos, st.session_state.insumos, st.session_state.equipos, st.session_state.personal, st.session_state.recetas, st.session_state.params)
-        if msg: st.error(f"Error: {msg}")
+        if msg: 
+            st.error(f"Error: {msg}")
+            # Limpiar resultados anteriores si la optimización falla
+            if 'resultados_optimizacion' in st.session_state:
+                del st.session_state.resultados_optimizacion
+                del st.session_state.produccion_optima
         else:
             st.success("¡Optimización completada!")
             st.session_state.resultados_optimizacion, st.session_state.A_ub, st.session_state.b_ub, st.session_state.costos_variables = res, A, b, costs
             st.session_state.produccion_optima = pd.DataFrame({'Producto': st.session_state.productos['Nombre'], 'Cantidad a Producir': res.x})
-    if 'resultados_optimizacion' in st.session_state:
+    
+    if 'resultados_optimizacion' in st.session_state and st.session_state.resultados_optimizacion: # Verificar que haya resultados válidos
         res, costs = st.session_state.resultados_optimizacion, st.session_state.costos_variables
+        
+        # Calcular el beneficio bruto con el valor óptimo (fun es negativo)
         beneficio_bruto = -res.fun
-        costo_total = np.dot(res.x, costs['insumos']) + np.dot(res.x, costs['personal'])
-        tasa_capital = st.session_state.params.get('costo_capital', 0) / 100
-        costo_financiero = costo_total * tasa_capital
-        beneficio_neto = beneficio_bruto - costo_financiero
-        c1, c2, c3 = st.columns(3); c1.metric("Beneficio Bruto Óptimo", f"${beneficio_bruto:,.2f}"); c2.metric("Costo Financiero", f"${costo_financiero:,.2f}", delta=f"-{st.session_state.params.get('costo_capital', 0)}%", delta_color="inverse"); c3.metric("Beneficio Neto Final", f"${beneficio_neto:,.2f}"); st.divider()
+        
+        # Asegurarse de que los arrays de costos tengan la misma longitud que res.x
+        if len(res.x) != len(costs['insumos']) or len(res.x) != len(costs['personal']):
+            st.error("Error: La longitud de los resultados de producción no coincide con los costos. Esto puede indicar un problema con la configuración de recetas o productos.")
+            beneficio_neto = 0 # Establecer a 0 para evitar más errores
+        else:
+            costo_total_variable = np.dot(res.x, costs['insumos']) + np.dot(res.x, costs['personal'])
+            tasa_capital = st.session_state.params.get('costo_capital', 0) / 100
+            costo_financiero = costo_total_variable * tasa_capital # El costo financiero se aplica a los costos variables
+            beneficio_neto = beneficio_bruto - costo_financiero
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Beneficio Bruto Óptimo", f"${beneficio_bruto:,.2f}")
+        c2.metric("Costo Financiero", f"${costo_financiero:,.2f}", delta=f"-{st.session_state.params.get('costo_capital', 0)}%", delta_color="inverse")
+        c3.metric("Beneficio Neto Final", f"${beneficio_neto:,.2f}")
+        st.divider()
+        
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("Plan de Producción"); df = st.session_state.produccion_optima; st.dataframe(df[df['Cantidad a Producir'] > 0.01], use_container_width=True)
+            st.subheader("Plan de Producción")
+            df = st.session_state.produccion_optima
+            st.dataframe(df[df['Cantidad a Producir'] > 0.01].sort_values(by='Cantidad a Producir', ascending=False), use_container_width=True)
         with c2:
-            st.subheader("Uso de Recursos"); recursos_usados = st.session_state.A_ub @ res.x
-            labels = [f"Insumo: {n}" for n in st.session_state.insumos['Nombre']] + [f"Equipo: {n}" for n in st.session_state.equipos['Nombre']] + [f"Personal: {n}" for n in st.session_state.personal['Rol']] + [f"Demanda: {n}" for n in st.session_state.productos['Nombre']]
-            df_uso = pd.DataFrame({'Restricción': labels, 'Usado': recursos_usados, 'Disponible': st.session_state.b_ub}); df_uso['Uso (%)'] = np.where(df_uso['Disponible'] > 0, (df_uso['Usado'] / df_uso['Disponible']) * 100, 0)
-            st.dataframe(df_uso, use_container_width=True); st.session_state.uso_recursos = df_uso
+            st.subheader("Uso de Recursos")
+            # Construir las etiquetas de las restricciones dinámicamente
+            labels = []
+            for _, insumo in st.session_state.insumos.iterrows(): labels.append(f"Insumo: {insumo['Nombre']}")
+            for _, equipo in st.session_state.equipos.iterrows(): labels.append(f"Equipo: {equipo['Nombre']}")
+            for _, p in st.session_state.personal.iterrows(): labels.append(f"Personal: {p['Rol']}")
+            for _, prod in st.session_state.productos.iterrows(): labels.append(f"Demanda: {prod['Nombre']}")
+            
+            recursos_usados = st.session_state.A_ub @ res.x
+            
+            df_uso = pd.DataFrame({'Restricción': labels, 'Usado': recursos_usados, 'Disponible': st.session_state.b_ub})
+            df_uso['Uso (%)'] = np.where(df_uso['Disponible'] > 0, (df_uso['Usado'] / df_uso['Disponible']) * 100, 0)
+            
+            # Ordenar por porcentaje de uso para ver cuellos de botella más fácilmente
+            st.dataframe(df_uso.sort_values(by='Uso (%)', ascending=False), use_container_width=True)
+            st.session_state.uso_recursos = df_uso
 
 elif page == "🧠 5. Análisis con IA":
     st.header("5. Análisis con IA y Contexto de Mercado")
-    if 'resultados_optimizacion' not in st.session_state: st.warning("Ejecuta la optimización primero.")
+    if 'resultados_optimizacion' not in st.session_state: st.warning("Ejecuta la optimización primero para generar un análisis con IA.")
+    elif not st.session_state.resultados_optimizacion: st.warning("La optimización no produjo resultados válidos. Verifica tus datos.")
     else:
         st.subheader("1. (Opcional) Cargar Archivo de Contexto")
         uploaded_file = st.file_uploader("Sube un PDF con análisis de mercado, precios de competidores, etc.", type="pdf")
@@ -241,7 +366,20 @@ elif page == "🧠 5. Análisis con IA":
                 st.error(f"Error al leer el PDF: {e}")
 
         st.subheader("2. Generar Insight")
-        beneficio_neto = -st.session_state.resultados_optimizacion.fun - (np.dot(st.session_state.resultados_optimizacion.x, st.session_state.costos_variables['insumos']) + np.dot(st.session_state.resultados_optimizacion.x, st.session_state.costos_variables['personal'])) * (st.session_state.params.get('costo_capital', 0) / 100)
+        
+        # Asegurarse de que los arrays de costos tengan la misma longitud
+        res = st.session_state.resultados_optimizacion
+        costs = st.session_state.costos_variables
+        
+        if len(res.x) != len(costs['insumos']) or len(res.x) != len(costs['personal']):
+            beneficio_neto = 0 # Valor por defecto si hay inconsistencia
+            st.error("Error al calcular el Beneficio Neto para la IA: Inconsistencia en los datos de optimización.")
+        else:
+            beneficio_bruto = -res.fun
+            costo_total_variable = np.dot(res.x, costs['insumos']) + np.dot(res.x, costs['personal'])
+            tasa_capital = st.session_state.params.get('costo_capital', 0) / 100
+            costo_financiero = costo_total_variable * tasa_capital
+            beneficio_neto = beneficio_bruto - costo_financiero
         
         contexto_interno = f"Resultados de Optimización:\n- Beneficio Neto Final: ${beneficio_neto:,.2f}\n\nProducción Óptima:\n{st.session_state.produccion_optima.to_string()}\n\nUso de Recursos (Cuellos de Botella):\n{st.session_state.uso_recursos.to_string()}"
         
